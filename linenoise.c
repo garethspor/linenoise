@@ -769,7 +769,7 @@ void linenoiseRemoteRefreshLine()
         return;
     }
     int ctrl_pipe_write_fd = ctrl_pipe_fd[1];
-    char buf[1] = {18}; //ctrl-r;
+    char buf[1] = {CTRL_R};
     write(ctrl_pipe_write_fd, buf, 1);
 }
 
@@ -836,7 +836,8 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
         retval = select(nfds, &rfds, NULL, NULL, NULL);
         if (retval == -1)
         {
-            fprintf(stderr, "Problem with select in linenoise\n");
+            fprintf(stderr, "Problem with select in linenoise: %s\n", strerror(errno));
+            exit(errno);
             continue;
         }
         else if (retval)
@@ -851,6 +852,7 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
             }
             else
             {
+                /* don't know how we would get here */
                 continue;
             }
         }
