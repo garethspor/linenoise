@@ -797,6 +797,8 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
     }
     int ctrl_pipe_read_fd = ctrl_pipe_fd[0];
 
+    int delayedRefresh = 0;
+
     /* Populate the linenoise state that we pass to functions implementing
      * specific editing functionalities. */
     l.ifd = stdin_fd;
@@ -833,7 +835,11 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
         FD_SET(ctrl_pipe_read_fd, &rfds);
         int nfds = (l.ifd > ctrl_pipe_read_fd) ? l.ifd+1 : ctrl_pipe_read_fd+1; //compute 1+(the greater fd) for select
 
-        retval = select(nfds, &rfds, NULL, NULL, NULL);
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 1e5; // 0.1 seconds
+
+        retval = select(nfds, &rfds, NULL, NULL, delayedRefresh ? &timeout : NULL);
         if (retval == -1)
         {
             fprintf(stderr, "Problem with select in linenoise: %s\n", strerror(errno));
@@ -857,7 +863,12 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
         }
         else
         {
-            // timeout, try again :)
+            // timeout
+            if (delayedRefresh)
+            {
+                delayedRefresh = 0;
+                refreshLine(&l);
+            }
             continue;
         }
 
@@ -1008,7 +1019,7 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
             linenoiseEditDeletePrevWord(&l);
             break;
         case CTRL_R: /* ctrl-r, refresh current line */
-            refreshLine(&l);
+            delayedRefresh = 1;
             break;
         }
     }
