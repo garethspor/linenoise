@@ -838,7 +838,6 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
         {
             fprintf(stderr, "Problem with select in linenoise: %s\n", strerror(errno));
             exit(errno);
-            continue;
         }
         else if (retval)
         {
