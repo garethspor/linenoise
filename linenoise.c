@@ -133,7 +133,7 @@ static int history_len = 0;
 static char **history = NULL;
 
 static int ctrl_pipe_created = 0;
-static int ctrl_pipe_fd[2] = {0, 0};
+static int ctrl_pipe_fd[2] = {-1, -1};
 
 /* The linenoiseState structure represents the state during line editing.
  * We pass this state to functions implementing specific editing
@@ -761,13 +761,9 @@ void linenoiseEditDeletePrevWord(struct linenoiseState *l) {
     refreshLine(l);
 }
 
-void linenoiseRemoteRefreshLine()
-{
+void linenoiseRemoteRefreshLine() {
     if (!ctrl_pipe_created)
-    {
-        /* linenoiseEdit must not have run yet so nothing will need refreshing */
-        return;
-    }
+        return ; /* linenoiseEdit must not have run yet so nothing will need refreshing */
     int ctrl_pipe_write_fd = ctrl_pipe_fd[1];
     char buf[1] = {CTRL_R};
     write(ctrl_pipe_write_fd, buf, 1);
@@ -785,11 +781,9 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
 {
     struct linenoiseState l;
 
-    if (!ctrl_pipe_created)
-    {
+    if (!ctrl_pipe_created) {
         int rc = pipe(ctrl_pipe_fd);
-        if (rc)
-        {
+        if (rc) {
             fprintf(stderr, "Problem creating pipe in linenoise: %s\n", strerror(errno));
             exit(errno);
         }
@@ -837,35 +831,24 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
 
         struct timeval timeout;
         timeout.tv_sec = 0;
-        timeout.tv_usec = 1e5; // 0.1 seconds
+        timeout.tv_usec = 100000; // 0.1 seconds
 
         retval = select(nfds, &rfds, NULL, NULL, delayedRefresh ? &timeout : NULL);
-        if (retval == -1)
-        {
+        if (retval == -1) {
             fprintf(stderr, "Problem with select in linenoise: %s\n", strerror(errno));
             exit(errno);
         }
         else if (retval)
         {
             if (FD_ISSET(l.ifd, &rfds))
-            {
                 nread = read(l.ifd,&c,1);
-            }
             else if (FD_ISSET(ctrl_pipe_read_fd, &rfds))
-            {
                 nread = read(ctrl_pipe_read_fd,&c,1);
-            }
             else
-            {
-                /* don't know how we would get here */
-                continue;
-            }
-        }
-        else
-        {
+                continue; /* don't know how we would get here */
+        } else {
             // timeout
-            if (delayedRefresh)
-            {
+            if (delayedRefresh) {
                 delayedRefresh = 0;
                 refreshLine(&l);
             }
