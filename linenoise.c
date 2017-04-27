@@ -151,6 +151,7 @@ struct linenoiseState {
     size_t cols;        /* Number of columns in terminal. */
     size_t maxrows;     /* Maximum num of rows used so far (multiline mode) */
     int history_index;  /* The history index we are currently editing. */
+    int delayed_refresh;/* Flag for registering a refres request */
 };
 
 enum KEY_ACTION{
@@ -334,6 +335,65 @@ static void linenoiseBeep(void) {
     fflush(stderr);
 }
 
+/* Read a character from the filedescriptor fd while also listening to the
+ * ctrl_pipe for refresh requests. */
+ssize_t linenoisePromptReadChar(int fd, char *buf, struct linenoiseState *ls)
+{
+    int nread = 0;
+    fd_set rfds;
+    int retval;
+    int nfds;
+    int ctrl_pipe_read_fd;
+
+    if (!ctrl_pipe_created) {
+        int rc = pipe(ctrl_pipe_fd);
+        if (rc) {
+            fprintf(stderr, "Problem creating pipe in linenoise: %s\n", strerror(errno));
+            exit(errno);
+        }
+        ctrl_pipe_created = 1;
+    }
+    ctrl_pipe_read_fd = ctrl_pipe_fd[0];
+
+    nfds = (fd > ctrl_pipe_read_fd) ? fd+1 : ctrl_pipe_read_fd+1; /* compute 1+(the greater fd) for select */
+
+    while (1) {
+        struct timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 10000; /* 0.01 seconds */
+
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        FD_SET(ctrl_pipe_read_fd, &rfds);
+
+        retval = select(nfds, &rfds, NULL, NULL, ls->delayed_refresh ? &timeout : NULL);
+        if (retval == -1) {
+            fprintf(stderr, "Problem with select in linenoise: %s\n", strerror(errno));
+            exit(errno);
+        }
+        else if (retval)
+        {
+            if (FD_ISSET(fd, &rfds))
+                nread = read(fd,buf,1);
+            else if (FD_ISSET(ctrl_pipe_read_fd, &rfds))
+                nread = read(ctrl_pipe_read_fd,buf,1);
+
+            if (nread && (*buf == CTRL_R))
+                ls->delayed_refresh = 1;
+            else
+                break;
+        } else {
+            /* timeout */
+            if (ls->delayed_refresh) {
+                ls->delayed_refresh = 0;
+                refreshLine(ls);
+            }
+        }
+    }
+
+    return nread;
+}
+
 /* ============================== Completion ================================ */
 
 /* Free a list of completion option populated by linenoiseAddCompletion(). */
@@ -363,21 +423,19 @@ static int completeLine(struct linenoiseState *ls) {
         size_t stop = 0, i = 0;
 
         while(!stop) {
+            struct linenoiseState completion_ls = *ls;
+            struct linenoiseState *temp_ls = ls;
             /* Show completion or original buffer */
             if (i < lc.len) {
-                struct linenoiseState saved = *ls;
-
-                ls->len = ls->pos = strlen(lc.cvec[i]);
-                ls->buf = lc.cvec[i];
-                refreshLine(ls);
-                ls->len = saved.len;
-                ls->pos = saved.pos;
-                ls->buf = saved.buf;
+                completion_ls.len = completion_ls.pos = strlen(lc.cvec[i]);
+                completion_ls.buf = lc.cvec[i];
+                temp_ls = &completion_ls;
             } else {
-                refreshLine(ls);
+                temp_ls = ls;
             }
+            refreshLine(temp_ls);
 
-            nread = read(ls->ifd,&c,1);
+            nread = linenoisePromptReadChar(temp_ls->ifd,&c,temp_ls);
             if (nread <= 0) {
                 freeCompletions(&lc);
                 return -1;
@@ -761,7 +819,8 @@ void linenoiseEditDeletePrevWord(struct linenoiseState *l) {
     refreshLine(l);
 }
 
-void linenoiseRemoteRefreshLine() {
+/* Lets external actors trigger a line refresh */
+void linenoiseRemoteRefreshLine(void) {
     if (!ctrl_pipe_created)
         return ; /* linenoiseEdit must not have run yet so nothing will need refreshing */
     int ctrl_pipe_write_fd = ctrl_pipe_fd[1];
@@ -781,18 +840,6 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
 {
     struct linenoiseState l;
 
-    if (!ctrl_pipe_created) {
-        int rc = pipe(ctrl_pipe_fd);
-        if (rc) {
-            fprintf(stderr, "Problem creating pipe in linenoise: %s\n", strerror(errno));
-            exit(errno);
-        }
-        ctrl_pipe_created = 1;
-    }
-    int ctrl_pipe_read_fd = ctrl_pipe_fd[0];
-
-    int delayedRefresh = 0;
-
     /* Populate the linenoise state that we pass to functions implementing
      * specific editing functionalities. */
     l.ifd = stdin_fd;
@@ -806,6 +853,7 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
     l.cols = getColumns(stdin_fd, stdout_fd);
     l.maxrows = 0;
     l.history_index = 0;
+    l.delayed_refresh = 0;
 
     /* Buffer starts empty. */
     l.buf[0] = '\0';
@@ -818,43 +866,10 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
     if (write(l.ofd,prompt,l.plen) == -1) return -1;
     while(1) {
         char c;
-        int nread = 0;
+        int nread;
         char seq[3];
 
-        fd_set rfds;
-        int retval;
-
-        FD_ZERO(&rfds);
-        FD_SET(l.ifd, &rfds);
-        FD_SET(ctrl_pipe_read_fd, &rfds);
-        int nfds = (l.ifd > ctrl_pipe_read_fd) ? l.ifd+1 : ctrl_pipe_read_fd+1; //compute 1+(the greater fd) for select
-
-        struct timeval timeout;
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 100000; // 0.1 seconds
-
-        retval = select(nfds, &rfds, NULL, NULL, delayedRefresh ? &timeout : NULL);
-        if (retval == -1) {
-            fprintf(stderr, "Problem with select in linenoise: %s\n", strerror(errno));
-            exit(errno);
-        }
-        else if (retval)
-        {
-            if (FD_ISSET(l.ifd, &rfds))
-                nread = read(l.ifd,&c,1);
-            else if (FD_ISSET(ctrl_pipe_read_fd, &rfds))
-                nread = read(ctrl_pipe_read_fd,&c,1);
-            else
-                continue; /* don't know how we would get here */
-        } else {
-            // timeout
-            if (delayedRefresh) {
-                delayedRefresh = 0;
-                refreshLine(&l);
-            }
-            continue;
-        }
-
+        nread = linenoisePromptReadChar(l.ifd,&c,&l);
         if (nread <= 0) return l.len;
 
         /* Only autocomplete when the callback is set. It returns < 0 when
@@ -924,14 +939,14 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
             /* Read the next two bytes representing the escape sequence.
              * Use two calls to handle slow terminals returning the two
              * chars at different times. */
-            if (read(l.ifd,seq,1) == -1) break;
-            if (read(l.ifd,seq+1,1) == -1) break;
+            if (linenoisePromptReadChar(l.ifd,seq,&l) == -1) break;
+            if (linenoisePromptReadChar(l.ifd,seq+1,&l) == -1) break;
 
             /* ESC [ sequences. */
             if (seq[0] == '[') {
                 if (seq[1] >= '0' && seq[1] <= '9') {
                     /* Extended escape, read additional byte. */
-                    if (read(l.ifd,seq+2,1) == -1) break;
+                    if (linenoisePromptReadChar(l.ifd,seq+2,&l) == -1) break;
                     if (seq[2] == '~') {
                         switch(seq[1]) {
                         case '3': /* Delete key. */
@@ -1000,9 +1015,6 @@ static int linenoiseEdit(int stdin_fd, int stdout_fd, char *buf, size_t buflen, 
             break;
         case CTRL_W: /* ctrl+w, delete previous word */
             linenoiseEditDeletePrevWord(&l);
-            break;
-        case CTRL_R: /* ctrl-r, refresh current line */
-            delayedRefresh = 1;
             break;
         }
     }
